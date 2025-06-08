@@ -181,7 +181,24 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     viewpoint = video_cams[viewpoint_index]
                     custom_cam.time = viewpoint.time
                     # print(custom_cam.time, viewpoint_index, count)
-                    
+
+                    ##参数	含义
+                    # custom_cam	当前的相机视角，类型是 MiniCam，由 GUI 传入，包含视锥体参数、投影矩阵、视图矩阵等
+                    # gaussians	当前高斯模型（GaussianModel），里面包括了所有点的：位置、缩放、旋转、透明度、球谐系数等可学习参数
+                    # pipe	渲染管线配置对象，控制是否使用 Python SH 转换、是否使用 Python 的协方差计算等
+                    # background	背景颜色，通常为 [1,1,1] 或 [0,0,0] 的 CUDA Tensor
+                    # scaling_modifer	缩放调节器，用于动态控制高斯的屏幕空间大小影响
+                    # stage	当前阶段，"coarse" 或 "fine"，影响是否使用变形网络
+                    # cam_type=scene.dataset_type	当前相机/数据集类型（例如 PanopticSports、Colmap、Blender），决定相机设置方式
+
+                    # 这个 render() 函数会返回一个字典，包含渲染输出的各个分量，例如：
+                    # {
+                    #     "render": rendered_image,             # ⬅ 最终渲染图像（torch.Tensor）【我们就是取这个】
+                    #     "viewspace_points": screenspace_points,  # 用于可视化/优化的屏幕空间坐标（有梯度）
+                    #     "visibility_filter": radii > 0,       # 哪些点参与了投影、可见
+                    #     "radii": radii,                       # 每个高斯点在屏幕上的半径（单位像素）
+                    #     "depth": depth                        # 渲染的深度图（每个像素对应的深度）
+                    # }
                     net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage=stage, cam_type=scene.dataset_type)["render"]
 
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
