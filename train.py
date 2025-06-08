@@ -54,7 +54,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             (model_params, first_iter) = torch.load(checkpoint)
             gaussians.restore(model_params, opt)
 
-
+    # 如果 dataset.white_background 为 True，表示该数据集采用白背景，则设置 bg_color = [1, 1, 1]，即 RGB 的白色；
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -70,6 +70,17 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training progress")
     first_iter += 1
     # lpips_model = lpips.LPIPS(net="alex").cuda()
+
+                             
+    # 从当前 scene 中获取用于 视频渲染 的相机列表（video_cams），用于后续动态场景可视化或评估阶段的图像渲染。
+    # 也就是说，它是一个封装了所有用于视频回放（或渲染评估）的相机序列的数据集对象，包含如下内容：
+                             
+    # 每一帧相机的：
+    # 内参（FoV、分辨率等）
+    # 外参（R, T）
+    # 时间戳 t
+    # 所对应图像路径
+    # 投影矩阵、相机中心等派生信息
     video_cams = scene.getVideoCameras()
     test_cams = scene.getTestCameras()
     train_cams = scene.getTrainCameras()
@@ -79,11 +90,42 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # dnerf's branch
         viewpoint_stack = [i for i in train_cams]
         temp_list = copy.deepcopy(viewpoint_stack)
-    # 
+    # 是否使用默认随机采样
     batch_size = opt.batch_size
     print("data loading done")
     if opt.dataloader:
+
         viewpoint_stack = scene.getTrainCameras()
+        # viewpoint_stack = [
+        #     Camera(...),  # 第1个视角
+        #     Camera(...),  # 第2个视角
+        #     ...
+        #     Camera(...),  # 第N个视角
+        # ]
+        
+        # Camera(
+        #     colmap_id=0,
+        #     R=array([[1.0, 0.0, 0.0], 
+        #              [0.0, 1.0, 0.0], 
+        #              [0.0, 0.0, 1.0]]),              # 旋转矩阵
+        #     T=array([0.0, 0.0, -5.0]),                # 平移向量
+        #     FoVx=0.857,                               # 水平方向视场角（弧度）
+        #     FoVy=0.642,                               # 垂直方向视场角（弧度）
+        #     image=tensor(3×H×W),                      # 原始图像（RGB）
+        #     gt_alpha_mask=tensor(1×H×W),              # alpha蒙版或 None
+        #     image_name='r_001.png',                   # 图像文件名
+        #     uid=0,                                    # 唯一ID
+        #     time=0.123,                               # 当前相机对应帧的时间戳
+        #     mask=None,                                # 可选的 mask
+        #     depth=None,                               # 可选的深度图
+        #     trans=array([0.0, 0.0, 0.0]),             # 相机平移
+        #     scale=1.0,                                # 场景缩放比例
+        #     world_view_transform=tensor(4×4),         # 相机变换矩阵 (世界到相机)
+        #     projection_matrix=tensor(4×4),            # 投影矩阵
+        #     full_proj_transform=tensor(4×4),          # 投影 * 视图矩阵
+        #     camera_center=tensor(3,)                  # 相机中心位置
+        # )
+
         if opt.custom_sampler is not None:
             sampler = FineSampler(viewpoint_stack)
             viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,sampler=sampler,num_workers=16,collate_fn=list)
@@ -96,6 +138,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     
     # dynerf, zerostamp_init
     # breakpoint()
+                             
+    # 从整个 viewpoint_stack 数据集中，抽取所有相机在某一个特定时间戳（timestamp）下对应的视角数据，即构造一个跨不同视角的“同一时间帧”的 Camera 列表。
+    # 它的核心思路是：对于每个相机视角，取其第 timestamp 帧的数据。
+        # 举例：假设 frame_length=60，表示每个视角有 60 帧；
+        # 输入 timestamp=0，则你会选出索引 [0, 60, 120, 180, ...]；
+        # 输入 timestamp=10，则索引为 [10, 70, 130, 190, ...]。
     if stage == "coarse" and opt.zerostamp_init:
         load_in_memory = True
         # batch_size = 4
@@ -103,7 +151,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         viewpoint_stack = temp_list.copy()
     else:
         load_in_memory = False 
-                            # 
+
+
     count = 0
     for iteration in range(first_iter, final_iter+1):        
         if network_gui.conn == None:
@@ -111,7 +160,16 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         while network_gui.conn != None:
             try:
                 net_image_bytes = None
+                
+                # 假设 network_gui.receive() 返回一个长度为 6 的元组，格式如下：
+                # custom_cam = ...                  # 用于在 GUI 中显示或测试的相机视角（可能是实时移动相机）
+                # do_training = ...                # 是否继续训练模型
+                # pipe.convert_SHs_python = ...    # 控制管线是否用 Python 实现 SH（球谐光照）转换
+                # pipe.compute_cov3D_python = ...  # 控制管线是否用 Python 实现协方差计算
+                # keep_alive = ...                 # 保持 GUI 连接活跃
+                # scaling_modifer = ...           # 缩放倍数（可调整模型显示大小）
                 custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
+                
                 if custom_cam != None:
                     count +=1
                     viewpoint_index = (count ) % len(video_cams)
@@ -123,6 +181,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     viewpoint = video_cams[viewpoint_index]
                     custom_cam.time = viewpoint.time
                     # print(custom_cam.time, viewpoint_index, count)
+                    
                     net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage=stage, cam_type=scene.dataset_type)["render"]
 
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
