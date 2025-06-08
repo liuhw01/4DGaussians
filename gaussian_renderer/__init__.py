@@ -21,8 +21,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     
     Background tensor (bg_color) must be on GPU!
     """
- 
+
+    
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    # 🧠 含义：
+    #     创建一个和 pc.get_xyz（高斯3D位置）同形状、同数据类型的张量，初始化为 0。
+    #     requires_grad=True 表示该张量会参与 梯度计算。
+    # 📦 _xyz 的结构：
+    #     self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+    #     类型：[N, 3] 的张量
+    #     含义：包含 N 个高斯点，每个点的 (x, y, z) 坐标
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
@@ -30,11 +38,34 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         pass
 
     # Set up rasterization configuration
-    
+    # 如果不是特例的 "PanopticSports" 数据集，就使用标准的相机设置（即 MiniCam 类型）。
     means3D = pc.get_xyz
     if cam_type != "PanopticSports":
+        
+        # ✅ 将相机的水平视场角（FoVx）和垂直视场角（FoVy）转换为其一半的正切值：
+        # 🧠 背景知识：视场角和透视投影
+        #     在透视投影中，视场角（FoV, Field of View）定义了相机观察的“张角”。越大，视野越广。
+        #     FoVx：水平视场角（弧度）
+        #     FoVy：垂直视场角（弧度）
+        # 🎯 为什么需要 tanfovx 和 tanfovy？
+        #     在 GaussianRasterizer 中，这两个值被用来：
+        #     将高斯点从 3D 空间投影到屏幕坐标（screen space）；
+        #     决定点在图像中的屏幕大小（受视角影响）；
+        #     保证渲染时不同分辨率或视角下投影尺寸一致。
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
         tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+
+        # 设置 Gaussian 光栅化器的关键参数：
+        #     image_height/width	渲染图像的分辨率
+        #     tanfovx/y	水平/垂直视场角的缩放因子
+        #     bg	背景色（如白色或黑色）
+        #     scale_modifier	缩放调节器（控制屏幕空间中的点大小）
+        #     viewmatrix	世界→相机的变换矩阵
+        #     projmatrix	投影矩阵（相机→屏幕）
+        #     sh_degree	当前球谐函数的阶数
+        #     campos	相机位置
+        #     prefiltered	是否启用预滤波（关）
+        #     debug	是否调试模式
         raster_settings = GaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
             image_width=int(viewpoint_camera.image_width),
@@ -54,14 +85,26 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         raster_settings = viewpoint_camera['camera']
         time=torch.tensor(viewpoint_camera['time']).to(means3D.device).repeat(means3D.shape[0],1)
         
-
+    # 🧠 GaussianRasterizer 是干什么的？
+        # 它是整个 3D高斯 Splatting 渲染核心，作用如下：
+        # ①	将每个高斯基元从 3D 投影到屏幕空间（使用投影矩阵）
+        # ②	按高斯协方差计算屏幕上的半径大小
+        # ③	对高斯进行 rasterization（光栅化），融合其颜色、不透明度、深度
+        # ④	合成最终图像，支持梯度传播
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
     # means3D = pc.get_xyz
     # add deformation to each points
     # deformation = pc.get_deformation
 
-    
+    # 这三行代码是准备高斯体渲染（Gaussian Splatting）所需的关键输入，它们分别指定了屏幕空间位置、透明度和颜色特征。
+    # ✅ means2D = screenspace_points
+    #     作用：设置每个高斯在屏幕空间（即图像平面）上的位置。
+    #     含义：screenspace_points 是一个与 pc.get_xyz 同形状的张量，初始为 0，但由于其启用了 requires_grad=True，它可以用于后续计算 视平面梯度。
+    #     这个变量通常在光栅化中用于记录 2D 投影坐标的位置，并用于 梯度回传（用于训练）。
+    #     背景：虽然这里是 0，但实际渲染中 rasterizer 会内部更新为每个高斯真实的屏幕坐标。
+    # ✅ opacity = pc._opacity  作用：获取每个高斯当前的 原始不透明度参数，尚未经过 sigmoid 激活。
+    # ✅ shs = pc.get_features  作用：提取每个高斯的 球谐系数（Spherical Harmonics） 颜色特征。
     means2D = screenspace_points
     opacity = pc._opacity
     shs = pc.get_features
@@ -72,13 +115,31 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rotations = None
     cov3D_precomp = None
     if pipe.compute_cov3D_python:
+        
+        # 用 Python 在前处理阶段计算高斯的协方差矩阵
+        # 返回一个 (N, 3, 3) 的张量，表示每个高斯的协方差矩阵；
+            # 它是通过：
+            # 先将 _scaling 应用 exp（确保正数）；
+            # 然后与 _rotation 构建一个变换矩阵；
+            # 最后通过 𝐿⋅𝐿𝑇L⋅L T计算协方差；
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
         scales = pc._scaling
         rotations = pc._rotation
+
+    # ✅ 它是一个形如 [True, False, True, True, ...] 的布尔向量，表示哪些高斯启用了变形（deformation）模块：
+    #     长度与高斯数相同；
+    #     值为 True 的点才会被送入变形网络；
+    #     后续用于筛选 deformation 输入。
     deformation_point = pc._deformation_table
+
+    # coarse 阶段：
+    # 表示训练的早期阶段，重点在于结构初始化，不考虑时间变化。
+    # 所以直接使用原始（静态）参数：
     if "coarse" in stage:
         means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
+
+    
     elif "fine" in stage:
         # time0 = get_time()
         # means3D_deform, scales_deform, rotations_deform, opacity_deform = pc._deformation(means3D[deformation_point], scales[deformation_point], 
