@@ -533,9 +533,14 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
     @torch.no_grad()
+
+    # ✅ 它是一个形如 [True, False, True, True, ...] 的布尔向量，表示哪些高斯启用了变形（deformation）模块：
+    # 如果某个高斯点在训练中累积了较多形变量（记录在 _deformation_accum 中），说明它很可能是动态的；
+    # 就把对应位置置为 True，进入变形通道。
     def update_deformation_table(self,threshold):
         # print("origin deformation point nums:",self._deformation_table.sum())
         self._deformation_table = torch.gt(self._deformation_accum.max(dim=-1).values/100,threshold)
+        
     def print_deformation_weight_grad(self):
         for name, weight in self._deformation.named_parameters():
             if weight.requires_grad:
