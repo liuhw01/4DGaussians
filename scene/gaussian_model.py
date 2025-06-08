@@ -24,6 +24,17 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
 from scene.regulation import compute_plane_smoothness
+
+# | 参数名              | 属性变量名                                                      | 说明                                  |
+# | ---------------- | ---------------------------------------------------------- | ----------------------------------- |
+# | **位置**           | `_xyz` / `get_xyz`                                         | 点的 3D 世界坐标                          |
+# | **尺度（scale）**    | `_scaling` / `get_scaling`                                 | 控制高斯的空间范围（协方差的平方根）                  |
+# | **朝向（rotation）** | `_rotation` / `get_rotation`                               | 表示高斯椭球体的方向，通常用四元数或旋转矩阵              |
+# | **透明度（opacity）** | `_opacity` / `get_opacity`                                 | 控制该高斯对图像的贡献程度（α值）                   |
+# | **球谐系数（SH）颜色特征** | `_features_dc`, `_features_rest` / `get_features`          | 用球谐（Spherical Harmonics）建模视角相关的颜色信息 |
+# | **变形权重**         | `_deformation`, `_deformation_table`, `_deformation_accum` | 动态场景中特有：控制点随时间如何变形                  |
+# | **最大投影半径**       | `max_radii2D`                                              | 投影到图像上的最大影响范围，用于裁剪或可见性计算            |
+
 class GaussianModel:
 
     def setup_functions(self):
