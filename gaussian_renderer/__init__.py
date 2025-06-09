@@ -9,6 +9,20 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+
+# ✅ means3D 和 means2D 的含义与区别
+# 名称	表示含义	数据空间	维度	用途
+# means3D	每个高斯的三维位置（中心）	世界坐标系	Nx3	真实的 3D 高斯位置
+# means2D	每个高斯在图像上的投影位置（中心）	屏幕/像素坐标	Nx2 或 Nx3	渲染时用于 rasterization 的位置
+# means3D (世界坐标)
+#    ↓ 通过 view/proj 矩阵
+# means2D (屏幕像素中心)
+#    ↓ 作为光栅化起点
+# Rasterization & 渲染输出
+# means2D 实际上是把 means3D 投影（Projection）到相机视图后的坐标，但这一步在 GaussianRasterizer 内部是必须显示提供的，因为它可以被训练用于反向传播优化。
+
+
+
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
@@ -31,6 +45,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     #     self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
     #     类型：[N, 3] 的张量
     #     含义：包含 N 个高斯点，每个点的 (x, y, z) 坐标
+    # 🚛“我用 means2D 做一个假的中转仓库，只为了帮我把梯度寄回来。真正的地址是 means3D，但不能直接寄，所以我中转一下。”
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
@@ -222,8 +237,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             #     3. 按照 mean2D[i]、cov[i]，渲染出它在图像上的影响区域（高斯罩）
             #     4. 用颜色 × 不透明度（shs 或 RGB），合成 RGB 图像（累加、前向透明度合成）
     rendered_image, radii, depth = rasterizer(
-        means3D = means3D_final,
-        means2D = means2D,
+        means3D = means3D_final,  # 真正影响渲染的高斯位置，来自 pc._xyz
+        means2D = means2D,   # 只是为了保留梯度信息的 dummy tensor
         shs = shs_final,
         colors_precomp = colors_precomp,
         opacities = opacity,
