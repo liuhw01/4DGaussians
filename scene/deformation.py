@@ -185,7 +185,7 @@ class Deformation(nn.Module):
             scales = torch.zeros_like(scales_emb[:,:3])
             scales = scales_emb[:,:3]*mask + ds
 
-        # 
+        # 旋转
         if self.args.no_dr :
             rotations = rotations_emb[:,:4]
         else:
@@ -197,6 +197,7 @@ class Deformation(nn.Module):
             else:
                 rotations = rotations_emb[:,:4] + dr
 
+        # 透明度
         if self.args.no_do :
             opacity = opacity_emb[:,:1] 
         else:
@@ -204,6 +205,8 @@ class Deformation(nn.Module):
           
             opacity = torch.zeros_like(opacity_emb[:,:1])
             opacity = opacity_emb[:,:1]*mask + do
+
+        # 球谐扰动
         if self.args.no_dshs:
             shs = shs_emb
         else:
@@ -214,6 +217,8 @@ class Deformation(nn.Module):
             shs = shs_emb*mask.unsqueeze(-1) + dshs
 
         return pts, scales, rotations, opacity, shs
+
+    
     def get_mlp_parameters(self):
         parameter_list = []
         for name, param in self.named_parameters():
