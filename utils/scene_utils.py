@@ -11,6 +11,7 @@ import copy
 def render_training_image(scene, gaussians, viewpoints, render_func, pipe, background, stage, iteration, time_now, dataset_type):
     def render(gaussians, viewpoint, path, scaling, cam_type):
         # scaling_copy = gaussians._scaling
+        # ✅ 执行渲染
         render_pkg = render_func(viewpoint, gaussians, pipe, background, stage=stage, cam_type=cam_type)
         label1 = f"stage:{stage},iter:{iteration}"
         times =  time_now/60
@@ -19,17 +20,25 @@ def render_training_image(scene, gaussians, viewpoints, render_func, pipe, backg
         else:
             end = "mins"
         label2 = "time:%.2f" % times + end
+
+        
         image = render_pkg["render"]
         depth = render_pkg["depth"]
         if dataset_type == "PanopticSports":
             gt_np = viewpoint['image'].permute(1,2,0).cpu().numpy()
         else:
             gt_np = viewpoint.original_image.permute(1,2,0).cpu().numpy()
+
+        # ✅ 可视化拼接
         image_np = image.permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
         depth_np = depth.permute(1, 2, 0).cpu().numpy()
         depth_np /= depth_np.max()
         depth_np = np.repeat(depth_np, 3, axis=2)
+        
+        # 拼接后：
         image_np = np.concatenate((gt_np, image_np, depth_np), axis=1)
+
+        
         image_with_labels = Image.fromarray((np.clip(image_np,0,1) * 255).astype('uint8'))  
         draw1 = ImageDraw.Draw(image_with_labels)
         font = ImageFont.truetype('./utils/TIMES.TTF', size=40) 
@@ -49,7 +58,7 @@ def render_training_image(scene, gaussians, viewpoints, render_func, pipe, backg
         os.makedirs(point_cloud_path)
     if not os.path.exists(image_path):
         os.makedirs(image_path)
-    
+    # ✅ 保存图片
     for idx in range(len(viewpoints)):
         image_save_path = os.path.join(image_path,f"{iteration}_{idx}.jpg")
         render(gaussians,viewpoints[idx],image_save_path,scaling = 1,cam_type=dataset_type)
