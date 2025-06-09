@@ -200,8 +200,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     #     "depth": depth                        # 渲染的深度图（每个像素对应的深度）
                     # }
                     net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage=stage, cam_type=scene.dataset_type)["render"]
-
+                    
+                    # 将网络渲染输出的 PyTorch 图像张量，转换成 [H, W, 3] 的 uint8 NumPy 图像，并打包成字节流以供外部使用。
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+
+                
+                # 这是用于 图形界面 GUI 实时预览或远程可视化（如 GUI 接收的 camera 参数），用于实时观察高斯渲染效果。
                 network_gui.send(net_image_bytes, dataset.source_path)
                 if do_training and ((iteration < int(opt.iterations)) or not keep_alive) :
                     break
@@ -214,6 +218,11 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
+        # 每 1000 次迭代提升一次当前使用的 SH（球谐）系数阶数（逐步使用更复杂的光照建模）
+            # 例如：            
+            # 第 0-1000 步：只用 SH-0（即 RGB 常数）
+            # 第 1000-2000 步：用 SH-1（线性系数）
+            # 直到最大阶数 max_sh_degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
@@ -222,6 +231,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # dynerf's branch
         if opt.dataloader and not load_in_memory:
             try:
+                # viewpoint_cams 是一个 list，长度为 batch_size，元素是摄像头参数字典（包含位姿、内参、图像等）
                 viewpoint_cams = next(loader)
             except StopIteration:
                 print("reset dataloader into random dataloader.")
@@ -233,9 +243,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         else:
             idx = 0
             viewpoint_cams = []
-
             while idx < batch_size :    
-                    
                 viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
                 if not viewpoint_stack :
                     viewpoint_stack =  temp_list.copy()
@@ -255,6 +263,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         viewspace_point_tensor_list = []
         for viewpoint_cam in viewpoint_cams:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
+            # 变量名	内容
+            #     images	渲染图像
+            #     gt_images	Ground Truth 图像
+            #     radii_list	每个高斯点投影到屏幕的半径
+            #     visibility_filter_list	视锥裁剪掩码
+            #     viewspace_point_tensor_list	用于 densify 的屏幕坐标误差量
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             images.append(image.unsqueeze(0))
             if scene.dataset_type!="PanopticSports":
@@ -272,10 +286,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
         image_tensor = torch.cat(images,0)
         gt_image_tensor = torch.cat(gt_images,0)
+
         # Loss
         # breakpoint()
         Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
-
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
         # norm
         
@@ -283,6 +297,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         loss = Ll1
         if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
+            # tv_loss 指的是 Temporal Smoothness Regularization Loss，
+            # 也就是 时间平滑正则项。它是 FreeGaussians、4D-Gaussian Splatting、FreeTimeGS 等方法中，为了约束高斯在时间维度上的平滑变化而引入的一种正则损失，用来避免模型在学习动态场景时产生不连续、不自然的变化。
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
             loss += tv_loss
         if opt.lambda_dssim != 0:
@@ -334,30 +350,45 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             # Densification
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
+                # 更新当前可见高斯点在屏幕空间的最大半径（用作稀疏剔除依据）。
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                # 系统记录每个高斯点的 屏幕梯度大小，用于之后判断该点是否需要复制或细化。
                 gaussians.add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
 
+                # 3. 动态设置 densify & pruning 阈值
                 if stage == "coarse":
                     opacity_threshold = opt.opacity_threshold_coarse
                     densify_threshold = opt.densify_grad_threshold_coarse
                 else:    
+                    # 在 fine 阶段，使用 线性插值的方式随着 iteration 逐步降低阈值 → 更加保守地 densify/prune
                     opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
                     densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
+                
+
                 if  iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<360000:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    
+                    # 当前轮数达到可 densify 训练阶段，当前高斯点数量不超过 36w
+                    # 将高梯度、opacity 合理的高斯点 复制，用于 finer 层次的建模。
                     gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold, 5, 5, scene.model_path, iteration, stage)
                 if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0]>200000:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-
+                    # 高斯点数 > 20w（避免提前清除有效结构） 5. 条件触发 Prune（剔除稀疏/冗余点）
                     gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
                     
                 # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 :
                 if iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<360000 and opt.add_point:
+                    # 点的主动生长（grow） 
+                    # 调用 grow 函数（不是复制已有点，而是新建点）：
+                    # 参数 (5, 5)：表示在每张视图中添加 5×5 个新点（类似均匀网格初始化或噪声采样）；                    
+                    # 这些点用于补充建模不足的区域，尤其在初始阶段建模不全时使用；
+                    # 与 densify()（复制已有高斯点）不同，grow() 是完全新增点。
                     gaussians.grow(5,5,scene.model_path,iteration,stage)
                     # torch.cuda.empty_cache()
                 if iteration % opt.opacity_reset_interval == 0:
                     print("reset opacity")
+                    # 透明度重置（reset_opacity） 
+                    # 每隔一定轮次（如 3000 iter），对所有点的 opacity 重新初始化；
+                    # 这样可以“唤醒”那些原本已经趋于静态或不可见的点，避免模型陷入局部最优；
                     gaussians.reset_opacity()
                     
             
@@ -370,6 +401,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
+                
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
@@ -378,9 +410,11 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
     timer.start()
+    # coarse
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                              checkpoint_iterations, checkpoint, debug_from,
                              gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer)
+    # fine
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
                          gaussians, scene, "fine", tb_writer, opt.iterations,timer)
