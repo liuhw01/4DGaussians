@@ -155,21 +155,45 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # time2 = get_time()
     # print("asset value:",time2-time1)
+
+    # 变正值    
+    # self.scaling_activation = torch.exp
+    # 将缩放尺度 scales_final（通常为网络输出的原始值）变换为正值，用于构造高斯协方差矩阵。
     scales_final = pc.scaling_activation(scales_final)
     rotations_final = pc.rotation_activation(rotations_final)
     opacity = pc.opacity_activation(opacity_final)
+
+
     # print(opacity.max())
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     # shs = None
+
+    # 初始化变量，准备后续赋值。这个变量最终会存储每个高斯的 RGB 颜色值。
     colors_precomp = None
+
+    # 判断是否使用外部强制设置的颜色（override_color），如果没有，就用球谐系数 SH 计算颜色。
+    # 实现了高斯颜色的确定
     if override_color is None:
         if pipe.convert_SHs_python:
+            
+            # 将球谐系数 reshape 成 (num_points, 3, num_coeffs)。
+            # 示例：如果有 10,000 个高斯、3 通道、16 个球谐系数 → shape 是 [10000, 3, 16]
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+
+            # 计算每个高斯中心指向相机的向量（相机视线方向）。
             dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.cuda().repeat(pc.get_features.shape[0], 1))
+
+            # 对该方向向量进行单位化，作为方向输入给 SH 函数。
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+
+            # 用方向和 SH 系数计算出 RGB 值：
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+
+            # SH 求和结果可能在 [-0.5, +0.5] 的范围（默认以 0 为中值），所以加 0.5；
+            # 再做一个下限裁剪，防止负数，确保 RGB ≥ 0。
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+            
         else:
             pass
             # shs = 
@@ -178,6 +202,25 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     # time3 = get_time()
+
+    # 调用高斯渲染器（rasterizer）生成最终图像 的核心步骤
+    # 输出：
+    #     rendered_image：最终 RGB 图像；
+    #     radii：每个高斯点在屏幕上的投影半径（判断显著性）；
+    #     depth：深度图（Z 值），用于遮挡或可视化。
+    # 参数	说明
+        # means3D_final	形变后的高斯中心坐标（[N, 3]）
+        # means2D	高斯中心在屏幕上的投影点坐标（[N, 2]）
+        # shs 或 colors_precomp	颜色信息（球谐系数 或 预计算 RGB）
+        # opacities	每个高斯的透明度 α（[N, 1]）
+        # scales	各向异性的高斯缩放系数（[N, 3]）
+        # rotations	高斯朝向的四元数旋转（[N, 4]）
+        # cov3D_precomp	可选的协方差矩阵，提前计算好提高效率
+            # for each gaussian i:
+            #     1. 将 mean3D[i] 投影成 mean2D[i]
+            #     2. 用 scale + rotation 构造 2D 高斯协方差（shape on screen）
+            #     3. 按照 mean2D[i]、cov[i]，渲染出它在图像上的影响区域（高斯罩）
+            #     4. 用颜色 × 不透明度（shs 或 RGB），合成 RGB 图像（累加、前向透明度合成）
     rendered_image, radii, depth = rasterizer(
         means3D = means3D_final,
         means2D = means2D,
