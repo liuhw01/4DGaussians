@@ -206,6 +206,30 @@ def get_spiral(c2ws_all, near_fars, rads_scale=1.0, N_views=120):
     )
     return np.stack(render_poses)
 
+# 🔍 1. 类的整体功能概述
+# 该类负责：
+# 从视频中提取图像帧
+# 加载每帧对应的相机 pose（位姿矩阵）
+# 构建训练 / 测试数据对
+# 提供 NDC 坐标的相机信息
+# 生成验证用的 Spiral 路径（用于 novel view synthesis）
+
+# | 参数名                  | 作用                                      |
+# | -------------------- | --------------------------------------- |
+# | `datadir`            | 数据根目录，需包含 `.mp4` 视频和 `poses_bounds.npy` |
+# | `split`              | 数据划分，支持 `"train"` 或 `"test"`            |
+# | `downsample`         | 图像尺寸下采样比例（影响分辨率和 focal）                 |
+# | `eval_index`         | 指定哪一个相机序列（即 `camXX.mp4`）用于测试，其它用于训练     |
+# | `scene_bbox_min/max` | 场景的 AABB 包围盒，在某些方法中用于坐标归一化              |
+
+# 核心数据包含：
+# data/dynerf/cut_roasted_beef/
+# ├── cam00.mp4
+# ├── cam01.mp4
+# ├── ...
+# ├── poses_bounds.npy
+#     poses_bounds.npy：包含每个视频帧的 [3x5 pose matrix, near, far]，shape 为 (N_views, 17)
+#     poses[i, :, :5] 是第 i 个相机的 [3x5] 矩阵，其中前 3x4 是位姿，最后一列是 [H, W, focal]
 
 class Neural3D_NDC_Dataset(Dataset):
     def __init__(
@@ -254,6 +278,14 @@ class Neural3D_NDC_Dataset(Dataset):
         self.load_meta()
         print(f"meta data loaded, total image:{len(self)}")
 
+    # 🔧 4. load_meta()：加载元数据
+    # 主要加载：poses_bounds.npy 中所有相机位姿和深度范围 near/far
+    # 把每个相机视频对应的 .mp4 文件按顺序匹配到位姿
+    # 得到：
+    # self.poses: 所有训练用的相机外参（排除 eval_index）
+    # self.val_poses: 使用 spiral 路径生成的验证相机序列
+    # self.focal: 相机焦距（以 NDC 归一化尺度调整）
+    # self.image_paths, self.image_poses, self.image_times: 每帧图像路径、相机位姿、时间戳
     def load_meta(self):
         """
         Load meta data from the dataset.
@@ -297,10 +329,28 @@ class Neural3D_NDC_Dataset(Dataset):
         self.image_paths, self.image_poses, self.image_times, N_cam, N_time = self.load_images_path(videos, self.split)
         self.cam_number = N_cam
         self.time_number = N_time
+
+    # 🌀 6. get_val_pose()：生成 Spiral 验证路径
+    # 利用 NeRF 的 spiral 路径生成方式，为新视角生成连续的 camera poses 和时间戳：
+    # render_poses = render_path_spiral(...)
+    # return render_poses, self.time_scale * render_times
+    # 可用于：
+    # novel view synthesis
+    # 可视化模型泛化能力
     def get_val_pose(self):
         render_poses = self.val_poses
         render_times = torch.linspace(0.0, 1.0, render_poses.shape[0]) * 2.0 - 1.0
         return render_poses, self.time_scale * render_times
+
+    # 🔁 5. 图像提取与 pose 匹配：load_images_path()
+    # 每个 .mp4 视频会在首次访问时被转换为图像帧，保存在：
+    # data/dynerf/cut_roasted_beef/cam00/images/
+    
+    # 对于每一帧：
+    # 相机位姿通过修正 poses_bounds.npy 得到 R, T
+    # 需要做变换：R = -R, R[:,0] = -R[:,0]，T = -pose[:3,3] @ R
+    # 图像按顺序存储，采样最大 countss=300 帧
+    # 训练集跳过 eval_index，测试集只取 eval_index
     def load_images_path(self,videos,split):
         image_paths = []
         image_poses = []
@@ -366,6 +416,13 @@ class Neural3D_NDC_Dataset(Dataset):
         return image_paths, image_poses, image_times, N_cams, N_time
     def __len__(self):
         return len(self.image_paths)
+        
+    # 🧩 7. __getitem__ 接口
+    # 返回每帧的训练数据三元组：
+    # img, (R, T), time
+    # img: [C, H, W] 格式的 RGB 图像 tensor
+    # pose: 相机外参（旋转和平移）
+    # time: 归一化时间戳，范围在 [0, 1]
     def __getitem__(self,index):
         img = Image.open(self.image_paths[index])
         img = img.resize(self.img_wh, Image.LANCZOS)
