@@ -152,9 +152,29 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     else:
         load_in_memory = False 
 
-
+    # | GUI (`custom_cam`)     | `render_training_image()` 渲染图 |
+    # | ---------------------- | ----------------------------- |
+    # | 你绕着人自由旋转，看到侧脸、背面、动态模糊等 | 固定 5 个正面角度，每隔 10 帧或 300 帧采样一次 |
+    # | 可以调节视角时间戳（快速浏览时间）      | 渲染的是固定时间戳（如 timestamp=0）      |
     count = 0
-    for iteration in range(first_iter, final_iter+1):        
+    for iteration in range(first_iter, final_iter+1):    
+        # ✅ 它的核心作用
+        # 不是用于训练！
+        # 而是：将高斯模型渲染成图像供外部 GUI（如可视化工具）实时预览使用。
+        # | 项目        | GUI 渲染分支（你问的那行）                        | 模型训练分支（viewpoint\_stack）                  |
+        # | --------- | -------------------------------------- | ----------------------------------------- |
+        # | 数据来源      | 来自外部图形界面传来的相机 `custom_cam`             | 从数据集加载的训练相机（`viewpoint_stack`）            |
+        # | 调用位置      | `while network_gui.conn != None` 这一段循环 | 主训练循环 `for iteration in ...` 中            |
+        # | 调用目的      | 实时渲染当前相机图像，**发送回 GUI 端可视化**            | 用于计算 loss、反向传播、参数更新                       |
+        # | 是否参与 loss | ❌ 不参与，纯推理                              | ✅ 是训练主数据来源                                |
+        # | 渲染频率      | 每次 GUI 发来请求时调用                         | 每轮迭代训练时使用                                 |
+        # | 输出图像      | 仅用于 GUI 显示，通常为 `uint8` 格式              | 用于与 GT 计算 L1/SSIM/Lpips loss，`float32` 张量 |
+        # 🔍 为什么还要用这个 custom_cam？
+        #     这是为了支持 交互式训练可视化，例如：
+        #     用户拖动 GUI 中视角，实时看到当前模型渲染效果
+        #     评估当前模型在任意相机下的可视化表现
+        #     可远程可视化高斯渲染状态，查看训练进展
+        #     这种机制就是 HUGS/FourDGS 等项目为什么能边训练边显示实时 3D 渲染的基础。
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -341,6 +361,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     or (iteration < 3000 and iteration % 50 == 49) \
                         or (iteration < 60000 and iteration %  100 == 99) :
                     # breakpoint()
+                        # render_training_image(...) 就是为了保存渲染图像结果到硬盘，方便你 不用 GUI 也能看到训练效果。你可以在训练过程中自动保存的文件夹里找到它们。
+                        # render_training_image 渲染的是 训练集 / 测试集中的固定相机视角（Camera 对象），
+                        # 而 GUI 使用的 custom_cam 是 外部控制的实时相机视角，
+                        # 所以二者的 相机位姿（pose）、FoV、时间戳等可能完全不同。
                         render_training_image(scene, gaussians, [test_cams[iteration%len(test_cams)]], render, pipe, background, stage+"test", iteration,timer.get_elapsed_time(),scene.dataset_type)
                         render_training_image(scene, gaussians, [train_cams[iteration%len(train_cams)]], render, pipe, background, stage+"train", iteration,timer.get_elapsed_time(),scene.dataset_type)
                         # render_training_image(scene, gaussians, train_cams, render, pipe, background, stage+"train", iteration,timer.get_elapsed_time(),scene.dataset_type)
